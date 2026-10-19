@@ -1,16 +1,18 @@
 /*
-check_stations.js
-Adds a "Check all stations" feature that probes station streams by actually attempting playback
-and removes stations that don't play. Persists removed station ids in localStorage so they remain hidden.
-
-Usage: include this file in index.html (e.g. <script src="/check_stations.js"></script>) or the country pages.
-It relies on the existing app globals: route, getCountry(code), countryDraw(), homeDraw(), and (optionally) Hls.
+check_stations.js (updated)
+Improved injection: more robustly inserts the "Check all stations" button by:
+ - trying right away,
+ - listening for DOMContentLoaded,
+ - observing DOM mutations to detect when header (.fixed or .top) appears,
+ - falling back to appending to body after a timeout.
+Also adds safer CSS.escape fallback and defensive checks.
 */
 
 (function () {
   'use strict';
 
   const DEAD_KEY = 'radioaxar_dead_v1';
+  const INJECTION_TIMEOUT = 8000; // ms: how long to keep trying to inject the button
 
   function loadDeadSet() {
     try { return new Set(JSON.parse(localStorage.getItem(DEAD_KEY)) || []); } catch { return new Set(); }
@@ -25,7 +27,8 @@ It relies on the existing app globals: route, getCountry(code), countryDraw(), h
 
   function removeRowByStationId(id) {
     try {
-      const sel = (window.CSS && CSS.escape) ? `[data-id="${CSS.escape(String(id))}"]` : `[data-id="${String(id).replace(/"/g, '\\"')}"]`;
+      const esc = (window.CSS && CSS.escape) ? CSS.escape(String(id)) : String(id).replace(/"/g, '\\"');
+      const sel = `[data-id="${esc}"]`;
       const el = document.querySelector(sel);
       if (el) el.remove();
       return !!el;
@@ -35,8 +38,7 @@ It relies on the existing app globals: route, getCountry(code), countryDraw(), h
   async function probeStream(url, timeout = 7000) {
     if (!/^https?:\/\//i.test(url)) return false;
 
-    const isHls = \/\.m3u8(\?|$)\/i.test ? 
-      (/\.m3u8(\?|$)/i.test(url)) : /\.m3u8(\?|$)/i.test(url);
+    const isHls = /\.m3u8(\?|$)/i.test(url);
 
     return new Promise(async (resolve) => {
       let done = false;
@@ -48,60 +50,32 @@ It relies on the existing app globals: route, getCountry(code), countryDraw(), h
         resolve(!!ok);
       };
 
-      const timer = setTimeout(() => {
-        finish(false);
-      }, timeout);
+      const timer = setTimeout(() => finish(false), timeout);
 
       const a = document.createElement('audio');
-      a.muted = true;
-      a.volume = 0;
-      a.preload = 'none';
-      a.playsInline = true;
-      a.style.display = 'none';
+      a.muted = true; a.volume = 0; a.preload = 'none'; a.playsInline = true; a.style.display = 'none';
       document.body.appendChild(a);
 
       async function cleanup() {
-        try {
-          a.pause();
-          a.removeAttribute('src');
-          a.src = '';
-          a.remove();
-        } catch (e) {}
+        try { a.pause(); a.removeAttribute('src'); a.src = ''; a.remove(); } catch (e) {}
       }
 
-      if (isHls && window.Hls && typeof window.Hls.isSupported === 'function') {
+      if (isHls && window.Hls && typeof window.Hls.isSupported === 'function' && window.Hls.isSupported()) {
         try {
-          const Hls = window.Hls;
-          if (!Hls || !Hls.isSupported || !Hls.isSupported()) {
-            // fallthrough to standard audio probe
-          } else {
-            const hls = new Hls();
-            hls.on(Hls.Events.ERROR, (_, data) => {
-              if (data && data.fatal) {
-                try { hls.destroy(); } catch {};
-                finish(false);
-              }
-            });
-            try {
-              hls.attachMedia(a);
-              hls.loadSource(url);
-            } catch (e) {
-              try { hls.destroy(); } catch {}
-              finish(false);
-              return;
-            }
+          const hls = new window.Hls();
+          hls.on(window.Hls.Events.ERROR, (_, data) => { if (data && data.fatal) { try { hls.destroy(); } catch {} finish(false); } });
+          try { hls.attachMedia(a); hls.loadSource(url); } catch (e) { try { hls.destroy(); } catch {} finish(false); return; }
 
-            const onPlaying = () => { try { hls.destroy(); } catch {} ; finish(true); };
-            const onTime = () => { try { hls.destroy(); } catch {} ; finish(true); };
-            const onError = () => { try { hls.destroy(); } catch {} ; finish(false); };
+          const onPlaying = () => { try { hls.destroy(); } catch {} finish(true); };
+          const onTime = () => { try { hls.destroy(); } catch {} finish(true); };
+          const onError = () => { try { hls.destroy(); } catch {} finish(false); };
 
-            a.addEventListener('playing', onPlaying, { once: true });
-            a.addEventListener('timeupdate', onTime, { once: true });
-            a.addEventListener('error', onError, { once: true });
+          a.addEventListener('playing', onPlaying, { once: true });
+          a.addEventListener('timeupdate', onTime, { once: true });
+          a.addEventListener('error', onError, { once: true });
 
-            try { a.load(); const p = a.play(); if (p && typeof p.then === 'function') p.catch(()=>{}); } catch (e) {}
-            return;
-          }
+          try { a.load(); const p = a.play(); if (p && typeof p.then === 'function') p.catch(()=>{}); } catch (e) {}
+          return;
         } catch (e) {}
       }
 
@@ -112,56 +86,34 @@ It relies on the existing app globals: route, getCountry(code), countryDraw(), h
       a.addEventListener('timeupdate', onTime, { once: true });
       a.addEventListener('error', onError, { once: true });
 
-      try {
-        a.src = url;
-        a.load();
-        const p = a.play();
-        if (p && typeof p.then === 'function') p.catch(() => {});
-      } catch (e) { finish(false); }
+      try { a.src = url; a.load(); const p = a.play(); if (p && typeof p.then === 'function') p.catch(() => {}); }
+      catch (e) { finish(false); }
     });
   }
 
   async function pMap(list, concurrency, mapper) {
     const result = new Array(list.length);
     let idx = 0;
-    const runners = new Array(concurrency).fill(0).map(async () => {
-      while (idx < list.length) {
-        const i = idx++;
-        try { result[i] = await mapper(list[i], i); } catch (e) { result[i] = { error: e }; }
-      }
+    const runners = new Array(Math.max(1, concurrency)).fill(0).map(async () => {
+      while (idx < list.length) { const i = idx++; try { result[i] = await mapper(list[i], i); } catch (e) { result[i] = { error: e }; } }
     });
     await Promise.all(runners);
     return result;
   }
 
   async function checkAllStationsForCurrentCountry({ concurrency = 3, timeout = 7000 } = {}) {
-    if (!window.route || !route.code) {
-      showToast('Open a country page first (tap a country).');
-      return;
-    }
+    if (!window.route || !route.code) { showToast('Open a country page first (tap a country).'); return; }
     const code = route.code;
     showToast('Loading stations…');
     let stationList;
-    try {
-      stationList = await getCountry(code);
-    } catch (e) {
-      showToast('Could not fetch stations for this country.');
-      return;
-    }
+    try { stationList = await getCountry(code); } catch (e) { showToast('Could not fetch stations for this country.'); return; }
 
     const candidates = stationList.filter(s => s && s.stream && typeof s.stream.url === 'string' && s.stream.url.startsWith('https:'));
-    if (!candidates.length) {
-      showToast('No https stations found on this country page.');
-      return;
-    }
+    if (!candidates.length) { showToast('No https stations found on this country page.'); return; }
 
     const deadSet = loadDeadSet();
     let removed = 0;
-    for (const s of candidates) {
-      if (deadSet.has(String(s.id))) {
-        if (removeRowByStationId(s.id)) removed++;
-      }
-    }
+    for (const s of candidates) { if (deadSet.has(String(s.id))) { if (removeRowByStationId(s.id)) removed++; } }
     showToast(`Checking ${candidates.length} stations (skipped ${removed} known-dead) …`);
 
     const results = await pMap(candidates, concurrency, async (s) => {
@@ -174,12 +126,7 @@ It relies on the existing app globals: route, getCountry(code), countryDraw(), h
 
     let newlyRemoved = 0;
     for (const r of results) {
-      if (!r.ok) {
-        deadSet.add(String(r.id));
-        if (removeRowByStationId(r.id)) newlyRemoved++;
-      } else {
-        deadSet.delete(String(r.id));
-      }
+      if (!r.ok) { deadSet.add(String(r.id)); if (removeRowByStationId(r.id)) newlyRemoved++; } else { deadSet.delete(String(r.id)); }
     }
     saveDeadSet(deadSet);
 
@@ -189,28 +136,41 @@ It relies on the existing app globals: route, getCountry(code), countryDraw(), h
     try { if (typeof countryDraw === 'function') countryDraw(); if (typeof homeDraw === 'function') homeDraw(); } catch (e) {}
   }
 
-  function addButton() {
-    if (document.getElementById('radioaxar-check-btn')) return;
-    const host = document.querySelector('.fixed') || document.querySelector('.top') || document.querySelector('#view') || document.body;
-    if (!host) return;
+  function createButton() {
     const btn = document.createElement('button');
-    btn.id = 'radioaxar-check-btn';
-    btn.type = 'button';
-    btn.textContent = 'Check all stations';
+    btn.id = 'radioaxar-check-btn'; btn.type = 'button'; btn.textContent = 'Check all stations';
     btn.style.cssText = 'margin-left:8px;padding:9px 14px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:var(--text);font-weight:700;cursor:pointer;';
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      try { await checkAllStationsForCurrentCountry(); } finally { btn.disabled = false; }
-    });
-    host.appendChild(btn);
+    btn.addEventListener('click', async () => { btn.disabled = true; try { await checkAllStationsForCurrentCountry(); } finally { btn.disabled = false; } });
+    return btn;
   }
 
-  (function wait() {
-    if (document.readyState !== 'complete') { setTimeout(wait, 400); return; }
-    if (document.querySelector('.fixed') || document.querySelector('.top') || document.querySelector('#view')) addButton();
-    else setTimeout(wait, 500);
-  })();
+  function addButtonImmediate() {
+    if (document.getElementById('radioaxar-check-btn')) return true;
+    const host = document.querySelector('.fixed') || document.querySelector('.top') || document.querySelector('#view') || document.body;
+    if (!host) return false;
+    try { host.appendChild(createButton()); return true; } catch (e) { return false; }
+  }
 
+  function installInjection() {
+    // try immediate
+    if (addButtonImmediate()) return;
+
+    // try on DOMContentLoaded
+    function onReady() { addButtonImmediate(); }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onReady); else onReady();
+
+    // mutation observer for dynamic headers
+    const obs = new MutationObserver(() => { if (addButtonImmediate()) obs.disconnect(); });
+    obs.observe(document.documentElement || document.body, { childList: true, subtree: true });
+
+    // fallback timeout: after INJECTION_TIMEOUT append to body if still not inserted
+    setTimeout(() => { if (!document.getElementById('radioaxar-check-btn')) { try { document.body.appendChild(createButton()); } catch (e) {} } obs.disconnect(); }, INJECTION_TIMEOUT);
+  }
+
+  // Start injection process
+  try { installInjection(); } catch (e) { console.error('check_stations injection failed', e); }
+
+  // Expose control functions
   window._radioaxar_check = checkAllStationsForCurrentCountry;
   window._radioaxar_clear_dead = function() { localStorage.removeItem(DEAD_KEY); showToast('Cleared saved dead stations'); };
 
