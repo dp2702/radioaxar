@@ -1123,11 +1123,11 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
   window.addEventListener('appinstalled', () => box.classList.remove('show'));
 })();
 
+  <script>
 (function () {
-  // small helper to report to TUNO toast function if available
-  function showToast(msg) { try { if (typeof toast === 'function') toast(msg); else console.log(msg); } catch { console.log(msg); } }
-
+  // Key to persist dead station ids
   const DEAD_KEY = 'radioaxar_dead_v1';
+
   function loadDeadSet() {
     try { return new Set(JSON.parse(localStorage.getItem(DEAD_KEY)) || []); } catch { return new Set(); }
   }
@@ -1135,162 +1135,242 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
     try { localStorage.setItem(DEAD_KEY, JSON.stringify([...set])); } catch {}
   }
 
-  // probe a URL: resolve true if audio becomes playable quickly, false on error/timeout.
-  function probeAudio(url, timeout = 3500) {
-    return new Promise(async (resolve) => {
-      // treat HLS specially: if .m3u8 and Hls is available consider it playable
-      const isHls = /\.m3u8/i.test(url);
-      if (isHls) {
-        // prefer native canPlayType first
-        if (audio && audio.canPlayType && audio.canPlayType('application/vnd.apple.mpegurl')) {
-          resolve(true);
-          return;
-        }
-        // if Hls library is available, assume it will play
-        if (window.Hls && typeof window.Hls.isSupported === 'function' && window.Hls.isSupported()) {
-          resolve(true);
-          return;
-        }
-        // otherwise continue to probe and allow timeout/failure to report as not playable
-      }
-
-      const a = new Audio();
-      let done = false;
-      const timer = setTimeout(() => {
-        if (!done) { done = true; try { a.pause(); a.src = ''; } catch {} resolve(false); }
-      }, timeout);
-
-      function finish(ok) {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        try { a.pause(); a.src = ''; } catch {}
-        resolve(!!ok);
-      }
-
-      a.preload = 'none';
-      a.volume = 0;
-      a.onerror = () => finish(false);
-      a.onstalled = () => finish(false);
-      a.oncanplay = () => finish(true);
-      a.oncanplaythrough = () => finish(true);
-
-      try {
-        a.src = url;
-        a.load();
-        // some streams may start with small delay; oncanplay will catch them
-      } catch (e) {
-        finish(false);
-      }
-    });
+  function showToast(msg) {
+    try { if (typeof toast === 'function') toast(msg); else console.log('TUNO:', msg); } catch (e) { console.log(msg); }
   }
 
-  // remove the DOM row with station id if present
+  // Remove rendered station row by id (stationRow uses data-id)
   function removeRowByStationId(id) {
     try {
-      // rows have data-id attribute (rendered by stationRow)
-      const el = document.querySelector(`[data-id="${CSS.escape(String(id))}"]`);
+      // CSS.escape may not exist on very old browsers; fallback to attribute selector with quotes
+      const sel = (window.CSS && CSS.escape) ? `[data-id="${CSS.escape(String(id))}"]` : `[data-id="${String(id).replace(/"/g, '\\"')}"]`;
+      const el = document.querySelector(sel);
       if (el) el.remove();
       return !!el;
     } catch (e) { return false; }
   }
 
-  // main check function for current country page
-  async function checkAllStationsForCurrentCountry() {
+  // Probe a single URL by attempting playback.
+  // Returns true if we get 'playing' or 'timeupdate' within timeout; false otherwise.
+  async function probeStream(url, timeout = 7000) {
+    // Quick heuristic: treat data URL / non-http as failed
+    if (!/^https?:\/\//i.test(url)) return false;
+
+    // If it's HLS and Hls.js is present, use it (we create an ephemeral Hls instance)
+    const isHls = /\.m3u8(\?|$)/i.test(url);
+
+    return new Promise(async (resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        cleanup().catch(()=>{});
+        resolve(!!ok);
+      };
+
+      const timer = setTimeout(() => {
+        finish(false);
+      }, timeout);
+
+      // Create hidden audio element (not the app audio so as not to disturb user state)
+      const a = document.createElement('audio');
+      a.muted = true;
+      a.volume = 0;
+      a.preload = 'none';
+      a.playsInline = true;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+
+      async function cleanup() {
+        try {
+          a.pause();
+          a.removeAttribute('src');
+          a.src = '';
+          a.remove();
+        } catch (e) {}
+      }
+
+      if (isHls && window.Hls && typeof window.Hls.isSupported === 'function') {
+        try {
+          const hls = new window.Hls();
+          let manifestParsed = false;
+          const onManifest = () => { manifestParsed = true; };
+          hls.on(window.Hls.Events.MANIFEST_PARSED, onManifest);
+          hls.on(window.Hls.Events.ERROR, (_, data) => {
+            if (data && data.fatal) {
+              hls.destroy();
+              finish(false);
+            }
+          });
+          try {
+            hls.attachMedia(a);
+            hls.loadSource(url);
+          } catch (e) {
+            hls.destroy();
+            finish(false);
+            return;
+          }
+          // try to play; if play promise rejects -> fail
+          try {
+            await a.play();
+          } catch (e) {
+            // play rejected (autoplay), but user gesture triggered check, still could reject
+            // fallback: wait for manifestParsed and then attempt play again briefly
+          }
+
+          // Listen for playing/timeupdate
+          const onPlaying = () => { hls.destroy(); finish(true); };
+          const onTime = () => { hls.destroy(); finish(true); };
+          const onError = () => { hls.destroy(); finish(false); };
+          a.addEventListener('playing', onPlaying, { once: true });
+          a.addEventListener('timeupdate', onTime, { once: true });
+          a.addEventListener('error', onError, { once: true });
+
+          // If manifest never parsed and no playing after small delay, still wait until timeout
+        } catch (e) {
+          await cleanup();
+          finish(false);
+        }
+        return;
+      }
+
+      // Non-HLS flow or no Hls.js
+      const onPlaying = () => finish(true);
+      const onTime = () => finish(true);
+      const onError = () => finish(false);
+      a.addEventListener('playing', onPlaying, { once: true });
+      a.addEventListener('timeupdate', onTime, { once: true });
+      a.addEventListener('error', onError, { once: true });
+
+      try {
+        a.src = url;
+        // call load then play; user click that triggered check should allow play()
+        a.load();
+        const p = a.play();
+        if (p && typeof p.then === 'function') {
+          p.catch(() => {
+            // play() rejected; still wait for 'canplay' or 'playing' events; reject will be handled by timeout
+          });
+        }
+      } catch (e) {
+        finish(false);
+      }
+
+      // Cleanup on finish already handled
+    });
+  }
+
+  // concurrency-limited map
+  async function pMap(list, concurrency, mapper) {
+    const result = [];
+    let idx = 0;
+    const runners = new Array(concurrency).fill(0).map(async () => {
+      while (idx < list.length) {
+        const i = idx++;
+        try { result[i] = await mapper(list[i], i); } catch (e) { result[i] = e; }
+      }
+    });
+    await Promise.all(runners);
+    return result;
+  }
+
+  // Main function that checks all stations for current route.code
+  async function checkAllStationsForCurrentCountry({ concurrency = 3, timeout = 7000 } = {}) {
     if (!route || !route.code) {
       showToast('Open a country page first (tap a country).');
       return;
     }
     const code = route.code;
     showToast('Loading stations…');
-    let list;
+    let stationList;
     try {
-      list = await getCountry(code); // uses app's function
+      stationList = await getCountry(code);
     } catch (e) {
-      showToast('Could not load country stations.');
+      showToast('Could not fetch stations for this country.');
       return;
     }
-    const visible = list.filter((s) => s && s.stream && typeof s.stream.url === 'string' && s.stream.url.startsWith('https:'));
-    if (!visible.length) {
-      showToast('No browser-playable (https) stations found on this page.');
+
+    // Keep only https streams (browser blocks http on https page)
+    const candidates = stationList.filter(s => s && s.stream && typeof s.stream.url === 'string' && s.stream.url.startsWith('https:'));
+    if (!candidates.length) {
+      showToast('No https stations found on this country page.');
       return;
     }
 
     const deadSet = loadDeadSet();
+    // fast remove of already-known dead ones
     let removed = 0;
-    let checked = 0;
-    // Quick pass: remove any previously-known dead ones immediately
-    for (const s of visible) {
+    for (const s of candidates) {
       if (deadSet.has(String(s.id))) {
         if (removeRowByStationId(s.id)) removed++;
       }
     }
+    showToast(`Checking ${candidates.length} stations (skipped ${removed} known-dead) …`);
 
-    showToast(`Checking ${visible.length} stations…`);
-    for (const s of visible) {
-      // if we already removed earlier, skip
-      if (deadSet.has(String(s.id))) continue;
+    // run probes with concurrency
+    const results = await pMap(candidates, concurrency, async (s) => {
+      const id = String(s.id || s.name || s.stream.url);
+      if (deadSet.has(id)) return { id, ok: false, reason: 'known-dead' };
 
-      checked++;
-      const url = (s.stream && s.stream.url) || '';
-      if (!url) continue;
-
-      // probe the stream
       let ok = false;
       try {
-        ok = await probeAudio(url, 3500);
-        // treat .m3u8 as playable if Hls.js is supported by the app
-        if (!ok && /\.m3u8/i.test(url) && window.Hls && typeof window.Hls.isSupported === 'function' && window.Hls.isSupported()) ok = true;
+        ok = await probeStream(s.stream.url, timeout);
       } catch (e) { ok = false; }
 
-      if (!ok) {
-        deadSet.add(String(s.id));
-        if (removeRowByStationId(s.id)) removed++;
+      return { id, ok, url: s.stream.url, station: s };
+    });
+
+    let newlyRemoved = 0;
+    for (const r of results) {
+      if (!r.ok) {
+        deadSet.add(String(r.id));
+        if (removeRowByStationId(r.id)) newlyRemoved++;
       } else {
-        deadSet.delete(String(s.id));
+        deadSet.delete(String(r.id));
       }
-      // small pause to keep UI responsive (optional)
-      await new Promise((r) => setTimeout(r, 120));
     }
-
     saveDeadSet(deadSet);
-    if (removed) showToast(`${removed} station(s) removed.`);
-    else showToast('All stations OK (or already checked).');
 
-    // re-draw the current country list if the app provided a draw function
-    try { if (typeof countryDraw === 'function') countryDraw(); } catch {}
+    if (newlyRemoved || removed) showToast(`${newlyRemoved + removed} station(s) removed.`);
+    else showToast('No more dead stations detected (or network blocked checks).');
+
+    // try to redraw the list if the app provides draw functions
+    try { if (typeof countryDraw === 'function') countryDraw(); if (typeof homeDraw === 'function') homeDraw(); } catch (e) {}
   }
 
-  // add button to header (.fixed) or fallback to .top
-  function addCheckButtonUI() {
-    if (document.getElementById('radio-check-all-btn')) return;
-    const host = document.querySelector('.fixed') || document.querySelector('.top') || document.body;
+  // Create UI button in header area
+  function addButton() {
+    if (document.getElementById('radioaxar-check-btn')) return;
+    const host = document.querySelector('.fixed') || document.querySelector('.top') || document.querySelector('#view') || document.body;
     if (!host) return;
     const btn = document.createElement('button');
-    btn.id = 'radio-check-all-btn';
+    btn.id = 'radioaxar-check-btn';
     btn.type = 'button';
     btn.textContent = 'Check all stations';
-    btn.style.cssText = 'margin-left:8px;padding:10px 14px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:var(--text);font-weight:700;cursor:pointer;';
-    btn.addEventListener('click', () => {
+    btn.style.cssText = 'margin-left:8px;padding:9px 14px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:var(--text);font-weight:700;cursor:pointer;';
+    btn.addEventListener('click', async () => {
       btn.disabled = true;
-      checkAllStationsForCurrentCountry().finally(() => { btn.disabled = false; });
+      try {
+        await checkAllStationsForCurrentCountry();
+      } finally { btn.disabled = false; }
     });
     host.appendChild(btn);
   }
 
-  // wait until the app UI appears, then add button
-  function waitForUi() {
-    if (document.body && (document.querySelector('.fixed') || document.querySelector('.top') || document.querySelector('#view'))) {
-      addCheckButtonUI();
-    } else {
-      setTimeout(waitForUi, 500);
-    }
-  }
-  waitForUi();
+  // Wait for app UI to be ready then add button
+  (function wait() {
+    if (document.readyState !== 'complete') { setTimeout(wait, 400); return; }
+    if (document.querySelector('.fixed') || document.querySelector('.top') || document.querySelector('#view')) addButton();
+    else setTimeout(wait, 500);
+  })();
 
-  // Expose for interactive debugging
+  // Expose for debugging
   window._radioaxar_check = checkAllStationsForCurrentCountry;
+  window._radioaxar_clear_dead = function() { localStorage.removeItem(DEAD_KEY); showToast('Cleared saved dead stations'); };
+
 })();
+</script>
 </script>
 </body>
 </html>
