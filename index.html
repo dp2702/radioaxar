@@ -658,6 +658,8 @@ async function renderCountry(code) {
   // Browsers block old http streams on a secure page, so only https stations are listed here (all of them play in the apps).
   const appOnly = stations.filter((s) => !s.stream.url.startsWith('https:')).length;
   stations = stations.filter((s) => s.stream.url.startsWith('https:'));
+  window.currentStations = stations;
+  window.currentCountry = code;
   const cats = ['all', 'fav', ...Object.keys(CATEGORY).filter((k) => stations.some((s) => s.category === k))];
   function radioTab() {
   $('ctab').innerHTML = `<div class="search">${ICON.search}<input id="q" type="search" placeholder="Search stations" autocomplete="off" aria-label="Search stations" value="${esc(listState.q)}"></div><div class="chips" id="chips"></div><div id="stations"></div>`;
