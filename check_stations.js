@@ -1,23 +1,19 @@
-/*
-check_stations.js
-RadioAXAR / TUNO station checker
-
-Features:
-- Reliable "Check All Stations" button injection
-- Works with dynamic page rendering
-- Detects playable and dead stations
-- Saves dead stations in localStorage
-- Saves working stations in localStorage
-- Removes dead stations from current list
-- Adds debug logging
-*/
-
 (function () {
   "use strict";
 
-  const DEAD_KEY = "radioaxar_dead_v2";
-  const WORKING_KEY = "radioaxar_working_v2";
-  const INJECTION_TIMEOUT = 10000;
+  const DEAD_KEY = "radioaxar_dead_v3";
+
+  function toastMsg(msg) {
+    try {
+      if (typeof toast === "function") {
+        toast(msg);
+      } else {
+        console.log(msg);
+      }
+    } catch {
+      console.log(msg);
+    }
+  }
 
   function loadDeadSet() {
     try {
@@ -28,194 +24,85 @@ Features:
   }
 
   function saveDeadSet(set) {
-    try {
-      localStorage.setItem(DEAD_KEY, JSON.stringify([...set]));
-    } catch {}
+    localStorage.setItem(DEAD_KEY, JSON.stringify([...set]));
   }
 
-  function loadWorkingSet() {
-    try {
-      return new Set(JSON.parse(localStorage.getItem(WORKING_KEY)) || []);
-    } catch {
-      return new Set();
-    }
-  }
-
-  function saveWorkingSet(set) {
-    try {
-      localStorage.setItem(WORKING_KEY, JSON.stringify([...set]));
-    } catch {}
-  }
-
-  function showToast(msg) {
-    try {
-      if (typeof toast === "function") {
-        toast(msg);
-      } else {
-        console.log("[StationCheck]", msg);
-      }
-    } catch {
-      console.log(msg);
-    }
-  }
-
-  function removeRowByStationId(id) {
-    try {
-      const esc =
-        window.CSS && CSS.escape
-          ? CSS.escape(String(id))
-          : String(id).replace(/"/g, '\\"');
-
-      const selectors = [
-        `[data-id="${esc}"]`,
-        `[data-station-id="${esc}"]`,
-        `[data-key="${esc}"]`
-      ];
-
-      for (const selector of selectors) {
-        const el = document.querySelector(selector);
-        if (el) {
-          el.remove();
-          return true;
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    }
-
-    return false;
-  }
-
-  async function probeStream(url, timeout = 10000) {
-    if (!url || !/^https?:\/\//i.test(url)) {
-      return false;
-    }
-
+  async function probe(url, timeout = 8000) {
     return new Promise((resolve) => {
-      let done = false;
 
-      const finish = (result) => {
-        if (done) return;
-        done = true;
+      const audio = document.createElement("audio");
+      let finished = false;
+
+      const done = (ok) => {
+        if (finished) return;
+        finished = true;
 
         clearTimeout(timer);
 
         try {
           audio.pause();
-          audio.removeAttribute("src");
-          audio.load();
-        } catch {}
-
-        try {
+          audio.src = "";
           audio.remove();
         } catch {}
 
-        resolve(result);
+        resolve(ok);
       };
 
-      const timer = setTimeout(() => finish(false), timeout);
+      const timer = setTimeout(() => done(false), timeout);
 
-      const audio = document.createElement("audio");
-
-      audio.style.display = "none";
-      audio.preload = "auto";
-      audio.muted = true;
+      audio.addEventListener("canplay", () => done(true), { once: true });
+      audio.addEventListener("loadedmetadata", () => done(true), { once: true });
+      audio.addEventListener("playing", () => done(true), { once: true });
+      audio.addEventListener("error", () => done(false), { once: true });
 
       document.body.appendChild(audio);
-
-      audio.addEventListener(
-        "loadedmetadata",
-        () => finish(true),
-        { once: true }
-      );
-
-      audio.addEventListener(
-        "canplay",
-        () => finish(true),
-        { once: true }
-      );
-
-      audio.addEventListener(
-        "playing",
-        () => finish(true),
-        { once: true }
-      );
-
-      audio.addEventListener(
-        "error",
-        () => finish(false),
-        { once: true }
-      );
 
       try {
         audio.src = url;
         audio.load();
       } catch {
-        finish(false);
+        done(false);
       }
     });
   }
 
-  async function pMap(list, concurrency, mapper) {
-    const result = new Array(list.length);
-
-    let index = 0;
-
-    const workers = new Array(Math.max(1, concurrency))
-      .fill(null)
-      .map(async () => {
-        while (index < list.length) {
-          const current = index++;
-
-          try {
-            result[current] = await mapper(list[current], current);
-          } catch (e) {
-            result[current] = {
-              error: e
-            };
-          }
-        }
-      });
-
-    await Promise.all(workers);
-
-    return result;
-  }
-
-  async function checkAllStationsForCurrentCountry({
-    concurrency = 3,
-    timeout = 10000
-  } = {}) {
+  async function getStations() {
 
     if (!window.route || !window.route.code) {
-      showToast("Open a country page first.");
-      return;
+      throw new Error("No country selected");
     }
 
-    const code = window.route.code;
+    const result = await getCountry(window.route.code);
 
-    console.log("Checking country:", code);
+    if (Array.isArray(result)) {
+      return result;
+    }
 
-    let stationData;
+    if (Array.isArray(result?.stations)) {
+      return result.stations;
+    }
+
+    return [];
+  }
+
+  async function checkStations() {
+
+    let stations;
 
     try {
-      stationData = await getCountry(code);
+      stations = await getStations();
     } catch (e) {
-      console.error(e);
-      showToast("Could not load stations.");
+      toastMsg("Open a country page first");
       return;
     }
 
-    const stations = Array.isArray(stationData)
-      ? stationData
-      : Array.isArray(stationData?.stations)
-      ? stationData.stations
-      : [];
-
-    console.log("Loaded stations:", stations.length);
+    if (!stations.length) {
+      toastMsg("No stations found");
+      return;
+    }
 
     const candidates = stations.filter(
-      (s) =>
+      s =>
         s &&
         s.stream &&
         typeof s.stream.url === "string" &&
@@ -223,261 +110,107 @@ Features:
     );
 
     if (!candidates.length) {
-      showToast("No stations found.");
+      toastMsg("No HTTPS stations found");
       return;
     }
 
+    toastMsg(`Checking ${candidates.length} stations`);
+
     const deadSet = loadDeadSet();
-    const workingSet = loadWorkingSet();
 
-    let removedAlreadyDead = 0;
+    let working = 0;
+    let dead = 0;
 
-    for (const station of candidates) {
+    for (const s of candidates) {
+
       const id = String(
-        station.id ||
-        station.name ||
-        station.stream.url
+        s.id ||
+        s.name ||
+        s.stream.url
       );
 
-      if (deadSet.has(id)) {
-        if (removeRowByStationId(id)) {
-          removedAlreadyDead++;
-        }
-      }
-    }
+      const ok = await probe(s.stream.url);
 
-    showToast(
-      `Checking ${candidates.length} stations...`
-    );
-
-    const results = await pMap(
-      candidates,
-      concurrency,
-      async (station) => {
-        const id = String(
-          station.id ||
-          station.name ||
-          station.stream.url
-        );
-
-        if (deadSet.has(id)) {
-          return {
-            id,
-            ok: false,
-            skipped: true
-          };
-        }
-
-        const ok = await probeStream(
-          station.stream.url,
-          timeout
-        );
-
-        return {
-          id,
-          ok,
-          station
-        };
-      }
-    );
-
-    let deadCount = 0;
-    let workingCount = 0;
-    let removedCount = 0;
-
-    for (const result of results) {
-
-      if (!result) continue;
-
-      const id = String(result.id);
-
-      if (result.ok) {
-
-        workingSet.add(id);
+      if (ok) {
+        working++;
         deadSet.delete(id);
-
-        workingCount++;
-
       } else {
-
+        dead++;
         deadSet.add(id);
-        workingSet.delete(id);
-
-        deadCount++;
-
-        if (removeRowByStationId(id)) {
-          removedCount++;
-        }
       }
+
+      console.log(
+        `${ok ? "WORKING" : "DEAD"}:`,
+        s.name,
+        s.stream.url
+      );
     }
 
     saveDeadSet(deadSet);
-    saveWorkingSet(workingSet);
 
-    console.log({
-      workingCount,
-      deadCount,
-      removedCount
-    });
-
-    showToast(
-      `Working: ${workingCount} | Dead: ${deadCount}`
+    toastMsg(
+      `Finished. Working=${working} Dead=${dead}`
     );
 
-    try {
-      if (typeof countryDraw === "function") {
-        countryDraw();
-      }
-
-      if (typeof homeDraw === "function") {
-        homeDraw();
-      }
-    } catch (e) {
-      console.error(e);
-    }
+    console.log("Working stations:", working);
+    console.log("Dead stations:", dead);
   }
 
-  function createButton() {
+  function createFloatingButton() {
+
+    if (document.getElementById("radioaxar-check-btn")) {
+      return;
+    }
 
     const btn = document.createElement("button");
 
     btn.id = "radioaxar-check-btn";
-    btn.type = "button";
-    btn.textContent = "Check All Stations";
 
-    btn.style.cssText = `
-      margin-left:8px;
-      padding:10px 15px;
-      border-radius:999px;
-      border:1px solid rgba(255,255,255,.15);
-      background:#2563eb;
-      color:white;
-      font-weight:700;
-      cursor:pointer;
-      z-index:9999;
-    `;
+    btn.textContent = "Check Stations";
 
-    btn.addEventListener("click", async () => {
+    btn.style.position = "fixed";
+    btn.style.bottom = "24px";
+    btn.style.right = "24px";
+    btn.style.zIndex = "2147483647";
+    btn.style.padding = "14px 18px";
+    btn.style.border = "none";
+    btn.style.borderRadius = "999px";
+    btn.style.background = "#2563eb";
+    btn.style.color = "#fff";
+    btn.style.cursor = "pointer";
+    btn.style.fontWeight = "700";
+    btn.style.boxShadow = "0 4px 20px rgba(0,0,0,.4)";
+    btn.style.fontSize = "14px";
+
+    btn.onclick = async () => {
       btn.disabled = true;
 
       try {
-        await checkAllStationsForCurrentCountry();
+        await checkStations();
       } finally {
         btn.disabled = false;
       }
-    });
+    };
 
-    return btn;
+    document.body.appendChild(btn);
+
+    console.log("RadioAXAR floating button created");
   }
 
-  function findHost() {
+  function keepButtonAlive() {
 
-    return (
-      document.querySelector(".actions") ||
-      document.querySelector(".header-actions") ||
-      document.querySelector(".fixed") ||
-      document.querySelector(".top") ||
-      document.querySelector("header") ||
-      document.querySelector("#view") ||
-      document.body
-    );
-  }
+    createFloatingButton();
 
-  function addButton() {
-
-    if (document.getElementById("radioaxar-check-btn")) {
-      return true;
-    }
-
-    const host = findHost();
-
-    if (!host) {
-      return false;
-    }
-
-    try {
-      host.appendChild(createButton());
-
-      console.log(
-        "Station checker button injected."
-      );
-
-      return true;
-
-    } catch (e) {
-
-      console.error(e);
-      return false;
-    }
-  }
-
-  function installInjection() {
-
-    if (addButton()) {
-      return;
-    }
-
-    if (document.readyState === "loading") {
-      document.addEventListener(
-        "DOMContentLoaded",
-        addButton,
-        { once: true }
-      );
-    } else {
-      addButton();
-    }
-
-    const observer = new MutationObserver(() => {
-      if (addButton()) {
-        observer.disconnect();
-      }
-    });
-
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
-
-    setTimeout(() => {
+    setInterval(() => {
 
       if (!document.getElementById("radioaxar-check-btn")) {
-
-        try {
-          document.body.appendChild(
-            createButton()
-          );
-
-          console.log(
-            "Fallback button injected."
-          );
-
-        } catch (e) {
-          console.error(e);
-        }
+        createFloatingButton();
       }
 
-      observer.disconnect();
-
-    }, INJECTION_TIMEOUT);
+    }, 1000);
   }
 
-  try {
-    installInjection();
-  } catch (e) {
-    console.error("Injection failed:", e);
-  }
+  keepButtonAlive();
 
-  window._radioaxar_check =
-    checkAllStationsForCurrentCountry;
-
-  window._radioaxar_clear_dead = () => {
-    localStorage.removeItem(DEAD_KEY);
-    showToast("Dead station cache cleared.");
-  };
-
-  window._radioaxar_clear_working = () => {
-    localStorage.removeItem(WORKING_KEY);
-    showToast("Working station cache cleared.");
-  };
-
+  window._radioaxar_check = checkStations;
 })();
