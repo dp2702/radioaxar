@@ -127,62 +127,54 @@ async function checkStations() {
     console.log("WORKING", working);
     console.log("DEAD", dead);
 }
+  
+function createButton() {
+  let btn = document.getElementById("radioaxar-check-btn");
 
-  function createFloatingButton() {
+  if (btn) return btn;
 
-    if (document.getElementById("radioaxar-check-btn")) {
-      return;
+  btn = document.createElement("button");
+  btn.id = "radioaxar-check-btn";
+  btn.textContent = "Check Stations";
+
+  btn.style.cssText = `
+    position:fixed !important;
+    right:20px !important;
+    bottom:20px !important;
+    z-index:2147483647 !important;
+    padding:12px 18px !important;
+    border:none !important;
+    border-radius:999px !important;
+    background:#2563eb !important;
+    color:white !important;
+    font-weight:bold !important;
+    cursor:pointer !important;
+    box-shadow:0 4px 12px rgba(0,0,0,.4) !important;
+    display:block !important;
+    visibility:visible !important;
+    opacity:1 !important;
+  `;
+
+  btn.onclick = checkStations;
+
+  document.body.appendChild(btn);
+
+  return btn;
+}
+
+function keepButtonAlive() {
+  createButton();
+
+  setInterval(() => {
+    if (!document.getElementById("radioaxar-check-btn")) {
+      createButton();
     }
+  }, 500);
+}
 
-    const btn = document.createElement("button");
-
-    btn.id = "radioaxar-check-btn";
-
-    btn.textContent = "Check Stations";
-
-    btn.style.position = "fixed";
-    btn.style.bottom = "24px";
-    btn.style.right = "24px";
-    btn.style.zIndex = "2147483647";
-    btn.style.padding = "14px 18px";
-    btn.style.border = "none";
-    btn.style.borderRadius = "999px";
-    btn.style.background = "#2563eb";
-    btn.style.color = "#fff";
-    btn.style.cursor = "pointer";
-    btn.style.fontWeight = "700";
-    btn.style.boxShadow = "0 4px 20px rgba(0,0,0,.4)";
-    btn.style.fontSize = "14px";
-
-    btn.onclick = async () => {
-      btn.disabled = true;
-
-      try {
-        await checkStations();
-      } finally {
-        btn.disabled = false;
-      }
-    };
-
-    document.body.appendChild(btn);
-
-    console.log("RadioAXAR floating button created");
-  }
-
-  function keepButtonAlive() {
-
-    createFloatingButton();
-
-    setInterval(() => {
-
-      if (!document.getElementById("radioaxar-check-btn")) {
-        createFloatingButton();
-      }
-
-    }, 1000);
-  }
-
-  keepButtonAlive();
+window.addEventListener("load", keepButtonAlive);
+document.addEventListener("DOMContentLoaded", keepButtonAlive);
+keepButtonAlive();
 
   window._radioaxar_check = checkStations;
 })();
