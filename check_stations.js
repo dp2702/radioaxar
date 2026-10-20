@@ -84,77 +84,49 @@
 
     return [];
   }
+  
+async function checkStations() {
 
-  async function checkStations() {
-
-    let stations;
-
-    try {
-      stations = await getStations();
-    } catch (e) {
-      toastMsg("Open a country page first");
-      return;
-    }
+    const stations = window.currentStations || [];
 
     if (!stations.length) {
-      toastMsg("No stations found");
-      return;
+        toast("No stations loaded");
+        return;
     }
 
-    const candidates = stations.filter(
-      s =>
-        s &&
-        s.stream &&
-        typeof s.stream.url === "string" &&
-        s.stream.url.startsWith("https")
+    toast(`Checking ${stations.length} stations`);
+
+    const working = [];
+    const dead = [];
+
+    for (const station of stations) {
+
+        const ok = await probe(station.stream.url);
+
+        if (ok) {
+            working.push(station);
+        } else {
+            dead.push(station);
+        }
+    }
+
+    localStorage.setItem(
+        "radioaxarWorkingStations",
+        JSON.stringify(working)
     );
 
-    if (!candidates.length) {
-      toastMsg("No HTTPS stations found");
-      return;
-    }
-
-    toastMsg(`Checking ${candidates.length} stations`);
-
-    const deadSet = loadDeadSet();
-
-    let working = 0;
-    let dead = 0;
-
-    for (const s of candidates) {
-
-      const id = String(
-        s.id ||
-        s.name ||
-        s.stream.url
-      );
-
-      const ok = await probe(s.stream.url);
-
-      if (ok) {
-        working++;
-        deadSet.delete(id);
-      } else {
-        dead++;
-        deadSet.add(id);
-      }
-
-      console.log(
-        `${ok ? "WORKING" : "DEAD"}:`,
-        s.name,
-        s.stream.url
-      );
-    }
-
-    saveDeadSet(deadSet);
-
-    toastMsg(
-      `Finished. Working=${working} Dead=${dead}`
+    localStorage.setItem(
+        "radioaxarDeadStations",
+        JSON.stringify(dead)
     );
 
-    console.log("Working stations:", working);
-    console.log("Dead stations:", dead);
-  }
+    toast(
+        `Done. Working: ${working.length}, Dead: ${dead.length}`
+    );
+
+    console.log("WORKING", working);
+    console.log("DEAD", dead);
+}
 
   function createFloatingButton() {
 
