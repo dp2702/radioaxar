@@ -20,7 +20,8 @@
     rowSelectors: [
       '[data-station]', '[data-station-id]', '[data-stream]', '[data-stream-url]',
       '[data-url]', '.station', '.station-card', '.station-item', '.radio-station',
-      '.radio-card', '.station-row', 'li[class*="station"]',
+      '.radio-card', '.station-row', '.row[data-id]', '.tile[data-id]', '.slot[data-id]',
+      'li[class*="station"]',
       'article[class*="station"]', 'a[href*="station"]'
     ].join(','),
     urlAttributes: [
@@ -94,6 +95,18 @@
   }
 
   function extractUrl(row) {
+    // TUNO keeps station data in window.currentStations and renders rows with data-id.
+    // Resolve the stream directly from that array, so index.html does not need data-stream attributes.
+    const stationId = row && row.dataset ? row.dataset.id : '';
+    if (stationId && Array.isArray(window.currentStations)) {
+      const station = window.currentStations.find(item => String(item && item.id) === String(stationId));
+      const currentUrl = normalizeUrl(
+        station && station.stream && (station.stream.url_resolved || station.stream.url) ||
+        station && (station.url_resolved || station.url || station.streamUrl || station.stream_url)
+      );
+      if (currentUrl) return currentUrl;
+    }
+
     const nodes = [row, ...row.querySelectorAll('audio,source,[data-stream],[data-stream-url],[data-url],[data-src],a[href]')];
     for (const node of nodes) {
       for (const attr of CONFIG.urlAttributes) {
