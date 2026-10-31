@@ -251,6 +251,16 @@
   .ctabs button.on { background: var(--accent); color: var(--on-accent); font-weight: 700; }
   .ctabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .player .t small { display: flex; align-items: center; gap: 8px; }
+  /* volume control */
+  .volume-control { display: flex; align-items: center; gap: 8px; flex: none; }
+  .volume-control svg { width: 21px; height: 21px; }
+  .volume-control input[type="range"] { width: 88px; margin: 0; cursor: pointer; accent-color: var(--accent); }
+  .volume-btn { all: unset; cursor: pointer; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; background: var(--chip); flex: none; }
+  .volume-btn:focus-visible, .volume-control input[type="range"]:focus-visible, .pvolume input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .pvolume { width: 292px; display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+  .pvolume input { flex: 1; min-width: 0; cursor: pointer; accent-color: var(--accent); }
+  .pvolume-value { width: 38px; color: rgba(255,255,255,.75); font-size: 12px; font-weight: 700; text-align: right; }
+  @media (max-width: 520px) { .player .volume-control input[type="range"] { display: none; } }
   .player .tmark { zoom: .6; margin: 0; flex: none; }
   /* player view: a page on narrow screens, a pane on the right on wide screens */
   .pview { position: fixed; inset: 0; z-index: 35; background: var(--bg); transform: translateX(100%); visibility: hidden; transition: transform .38s cubic-bezier(.2,.8,.2,1), visibility 0s .38s; overflow: hidden; }
@@ -342,6 +352,10 @@
   <div class="in">
     <div class="logo" id="p-logo"></div>
     <div class="t"><b id="p-name"></b><small id="p-sub"></small></div>
+    <div class="volume-control">
+      <button class="volume-btn" id="volume-toggle" type="button" aria-label="Mute" title="Mute"></button>
+      <input id="volume-range" type="range" min="0" max="100" step="1" value="80" aria-label="Volume">
+    </div>
     <button class="sleepbtn" id="p-sleep" type="button" aria-label="Sleep timer" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><small id="p-sleep-t"></small></button>
     <button class="pp" id="p-btn" type="button" aria-label="Play"></button>
   </div>
@@ -413,6 +427,65 @@ const PAGE = 60;
 const $ = (id) => document.getElementById(id);
 const view = $('view');
 const audio = $('audio');
+// ---------- volume ----------
+const VOLUME_KEY = 'radio.volume';
+const MUTED_KEY = 'radio.muted';
+let lastAudibleVolume = 0.8;
+const VOLUME_HIGH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18 6a8.5 8.5 0 0 1 0 12"/></svg>';
+const VOLUME_LOW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>';
+const VOLUME_MUTED = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m16 9 5 5"/><path d="m21 9-5 5"/></svg>';
+function volumeIcon() {
+  if (audio.muted || audio.volume === 0) return VOLUME_MUTED;
+  return audio.volume < 0.5 ? VOLUME_LOW : VOLUME_HIGH;
+}
+function updateVolumeUI() {
+  const shownVolume = audio.muted ? 0 : Math.round(audio.volume * 100);
+  const range = $('volume-range');
+  const button = $('volume-toggle');
+  if (range) { range.value = Math.round(audio.volume * 100); range.setAttribute('aria-valuetext', shownVolume + ' percent'); }
+  if (button) { button.innerHTML = volumeIcon(); button.setAttribute('aria-label', audio.muted ? 'Unmute' : 'Mute'); button.title = audio.muted ? 'Unmute' : 'Mute'; }
+  document.querySelectorAll('[data-pv-volume]').forEach((slider) => { slider.value = Math.round(audio.volume * 100); slider.setAttribute('aria-valuetext', shownVolume + ' percent'); });
+  document.querySelectorAll('.pvolume-value').forEach((label) => { label.textContent = shownVolume + '%'; });
+}
+function persistVolume() {
+  try { localStorage.setItem(VOLUME_KEY, String(audio.volume)); localStorage.setItem(MUTED_KEY, String(audio.muted)); } catch (e) {}
+}
+function setVolume(value) {
+  const normalized = Math.max(0, Math.min(1, Number(value)));
+  audio.volume = normalized;
+  audio.muted = normalized === 0;
+  if (normalized > 0) lastAudibleVolume = normalized;
+  persistVolume();
+  updateVolumeUI();
+}
+function toggleMute() {
+  if (audio.muted || audio.volume === 0) {
+    audio.muted = false;
+    if (audio.volume === 0) audio.volume = lastAudibleVolume || 0.8;
+  } else {
+    lastAudibleVolume = audio.volume;
+    audio.muted = true;
+  }
+  persistVolume();
+  updateVolumeUI();
+  renderPv();
+}
+(function restoreVolume() {
+  let savedVolume = 0.8;
+  let savedMuted = false;
+  try {
+    const rawVolume = localStorage.getItem(VOLUME_KEY);
+    const rawMuted = localStorage.getItem(MUTED_KEY);
+    if (rawVolume !== null) {
+      const parsed = Number(rawVolume);
+      if (Number.isFinite(parsed)) savedVolume = Math.max(0, Math.min(1, parsed));
+    }
+    savedMuted = rawMuted === 'true';
+  } catch (e) {}
+  audio.volume = savedVolume;
+  audio.muted = savedMuted;
+  if (savedVolume > 0) lastAudibleVolume = savedVolume;
+})();
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function load(key, def) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; } catch (e) { return def; } }
 function save(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
@@ -845,6 +918,10 @@ function showPlayer(sub, err) {
   el.classList.toggle('err', !!err);
 }
 $('p-btn').addEventListener('click', togglePlay);
+$('volume-range').addEventListener('input', (e) => setVolume(Number(e.target.value) / 100));
+$('volume-toggle').addEventListener('click', (e) => { e.stopPropagation(); toggleMute(); });
+audio.addEventListener('volumechange', updateVolumeUI);
+updateVolumeUI();
 
 // ---------- sleep timer ----------
 let sleepEnd = 0;
@@ -948,6 +1025,11 @@ function renderPv() {
       <div class="picons"><button class="pib fav${isFav(st.id) ? ' on' : ''}" type="button" data-pv="fav" aria-label="${isFav(st.id) ? 'Remove from favorites' : 'Add to favorites'}">${HEART(isFav(st.id))}</button>
         <button class="pib timer${sleepEnd ? ' on' : ''}" id="pv-timer" type="button" data-pv="timer" aria-label="Sleep timer">${MOON}</button></div>
       <div class="pctl">${chip(nbr.prev, false)}<button class="pbig" type="button" data-pv="play" aria-label="${playing ? 'Pause' : 'Play'}">${bigIcon}</button>${chip(nbr.next, true)}</div></div>
+    <div class="pvolume">
+      <button class="volume-btn" type="button" data-pv="volume-toggle" aria-label="${audio.muted ? 'Unmute' : 'Mute'}" title="${audio.muted ? 'Unmute' : 'Mute'}">${volumeIcon()}</button>
+      <input type="range" data-pv-volume min="0" max="100" step="1" value="${Math.round(audio.volume * 100)}" aria-label="Volume" aria-valuetext="${audio.muted ? 0 : Math.round(audio.volume * 100)} percent">
+      <span class="pvolume-value">${audio.muted ? 0 : Math.round(audio.volume * 100)}%</span>
+    </div>
     <div class="pvlogo">${LOGO}</div>
   </div></div>`;
 }
@@ -992,9 +1074,18 @@ $('pview').addEventListener('click', (e) => {
     else if (route.code && listState.cat === 'fav' && countryDraw) countryDraw();
     redrawRows();
     renderPv();
+  } else if (act === 'volume-toggle') {
+    toggleMute();
   }
 });
-$('player').addEventListener('click', (e) => { if (!e.target.closest('button')) openPv(); });
+$('pview').addEventListener('input', (e) => {
+  const slider = e.target.closest('[data-pv-volume]');
+  if (slider) setVolume(Number(slider.value) / 100);
+});
+$('player').addEventListener('click', (e) => {
+  if (e.target.closest('button, input, .volume-control, .sleepmenu')) return;
+  openPv();
+});
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && pvOpen) closePv(); });
 renderPv();
 
